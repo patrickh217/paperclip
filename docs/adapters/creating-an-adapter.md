@@ -266,6 +266,14 @@ The invariant adapters must preserve:
 
 The invariant is pinned by the "no-remote-git contract" case in `packages/adapter-utils/src/ssh-fixture.test.ts`: it asserts `git remote` is empty before and after the round-trip and that a remote-only commit still lands locally via restore alone.
 
+## Agent JWT contract (`supportsLocalAgentJwt`)
+
+When `supportsLocalAgentJwt: true`, the server generates a short-lived HMAC-SHA256 JWT and passes it to the adapter execute context as `PAPERCLIP_API_KEY`. The JWT is signed with `PAPERCLIP_AGENT_JWT_SECRET` (falling back to `BETTER_AUTH_SECRET`).
+
+**Dependency on the server's JWT secret:** The JWT can only be minted when the secret is present in `process.env` at heartbeat time. In `local_trusted` mode the server auto-provisions `PAPERCLIP_AGENT_JWT_SECRET` on first boot (writes a 32-byte random hex value to the instance `.env`, mode 0600, and loads it into `process.env` before the heartbeat scheduler starts). In `authenticated` mode the secret must be supplied explicitly — a missing secret throws at startup. Adapters relying on `supportsLocalAgentJwt` can therefore assume the secret is available whenever the server is running.
+
+**What happens if the secret is absent:** `createLocalAgentJwt` returns `null` and the heartbeat falls back to `local-board` attribution with no `PAPERCLIP_API_KEY`. All API calls made by the agent will be unauthenticated.
+
 ## Security
 
 - Treat agent output as untrusted (parse defensively, never execute)
