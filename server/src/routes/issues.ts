@@ -1725,6 +1725,26 @@ export function issueRoutes(
     return decision.allowed;
   }
 
+  async function buildManagerChainPath(
+    companyId: string,
+    managerAgentId: string,
+    assigneeAgentId: string,
+  ): Promise<string[]> {
+    const rows = await db
+      .select({ id: agents.id, reportsTo: agents.reportsTo })
+      .from(agents)
+      .where(eq(agents.companyId, companyId));
+    const agentsById = new Map(rows.map((a) => [a.id, a]));
+    const path: string[] = [];
+    let cursor: string | null = assigneeAgentId;
+    for (let depth = 0; cursor && depth < 50; depth++) {
+      path.push(cursor);
+      if (cursor === managerAgentId) break;
+      cursor = agentsById.get(cursor)?.reportsTo ?? null;
+    }
+    return path.reverse();
+  }
+
   async function assertAgentIssueMutationAllowed(
     req: Request,
     res: Response,
@@ -1737,6 +1757,7 @@ export function issueRoutes(
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
     },
+    opts?: { allowManagerOverride?: boolean },
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -1753,6 +1774,10 @@ export function issueRoutes(
       return true;
     }
     if (issue.assigneeAgentId !== actorAgentId) {
+      if (opts?.allowManagerOverride && boundaryDecision.reason === "allow_manager_chain") {
+        res.locals.managerOverride = true;
+        return true;
+      }
       if (await hasActiveCheckoutManagementOverride(actorAgentId, issue.companyId, issue.assigneeAgentId)) {
         return true;
       }
@@ -4638,7 +4663,23 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, existing, { allowManagerOverride: true }))) return;
+    if (res.locals.managerOverride) {
+      const MANAGER_OVERRIDE_ALLOWED_FIELDS = new Set([
+        "status", "blockedByIssueIds", "priority", "labelIds", "projectId",
+        "goalId", "parentId", "billingCode", "title", "description",
+        "comment", "reviewRequest", "reopen", "resume", "interrupt", "hiddenAt",
+      ]);
+      const violating = Object.keys(req.body).filter((k) => !MANAGER_OVERRIDE_ALLOWED_FIELDS.has(k));
+      if (violating.length > 0) {
+        res.status(403).json({ error: "field outside manager-override allowlist", fields: violating });
+        return;
+      }
+      if (existing.status === "in_progress") {
+        res.status(409).json({ error: "report has active checkout; use tasks:manage_active_checkouts override path" });
+        return;
+      }
+    }
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
 
     const actor = getActorInfo(req);
@@ -4981,6 +5022,41 @@ export function issueRoutes(
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
+    }
+
+    if (res.locals.managerOverride && req.actor.type === "agent" && req.actor.agentId && existing.assigneeAgentId) {
+      const actorAgentId = req.actor.agentId;
+      const patchedFields: Record<string, { from: unknown; to: unknown }> = {};
+      const auditableScalarFields = ["status", "priority", "projectId", "goalId", "parentId", "billingCode", "title", "description"] as const;
+      for (const field of auditableScalarFields) {
+        const next = (updateFields as Record<string, unknown>)[field];
+        if (next !== undefined) {
+          patchedFields[field] = { from: (existing as Record<string, unknown>)[field], to: next };
+        }
+      }
+      if (Array.isArray(req.body.blockedByIssueIds)) {
+        patchedFields.blockedByIssueIds = {
+          from: existingRelations?.blockedBy.map((r) => r.id) ?? [],
+          to: req.body.blockedByIssueIds,
+        };
+      }
+      const chainPath = await buildManagerChainPath(existing.companyId, actorAgentId, existing.assigneeAgentId);
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: "agent",
+        actorId: actorAgentId,
+        agentId: actorAgentId,
+        runId: req.actor.runId ?? null,
+        action: "issue.manager_override_mutate",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          actorAgentId,
+          assigneeAgentId: existing.assigneeAgentId,
+          chainPath,
+          patchedFields,
+        },
+      });
     }
 
     let cancelledStatusRunId: string | null = null;

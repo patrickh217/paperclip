@@ -34,6 +34,7 @@ type StartupBannerOptions = {
   databaseBackupIntervalMinutes: number;
   databaseBackupRetentionDays: number;
   databaseBackupDir: string;
+  jwtSecretAutoProvisioned?: boolean;
 };
 
 const ansi = {
@@ -68,6 +69,7 @@ function redactConnectionString(raw: string): string {
 
 function resolveAgentJwtSecretStatus(
   envFilePath: string,
+  autoProvisioned: boolean,
 ): {
   status: "pass" | "warn";
   message: string;
@@ -76,7 +78,7 @@ function resolveAgentJwtSecretStatus(
   if (envValue) {
     return {
       status: "pass",
-      message: "set",
+      message: autoProvisioned ? `auto-provisioned ${color(`(${envFilePath})`, "dim")}` : "set",
     };
   }
 
@@ -104,7 +106,7 @@ export function printStartupBanner(opts: StartupBannerOptions): void {
   const uiUrl = opts.uiMode === "none" ? "disabled" : baseUrl;
   const configPath = resolvePaperclipConfigPath();
   const envFilePath = resolvePaperclipEnvPath();
-  const agentJwtSecret = resolveAgentJwtSecretStatus(envFilePath);
+  const agentJwtSecret = resolveAgentJwtSecretStatus(envFilePath, opts.jwtSecretAutoProvisioned ?? false);
 
   const dbMode =
     opts.db.mode === "embedded-postgres"

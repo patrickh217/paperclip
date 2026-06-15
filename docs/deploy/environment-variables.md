@@ -28,6 +28,18 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_SECRETS_MASTER_KEY_FILE` | `~/.paperclip/.../secrets/master.key` | Path to key file |
 | `PAPERCLIP_SECRETS_STRICT_MODE` | `false` | Require secret refs for sensitive env vars |
 
+## Agent JWT Signing
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPERCLIP_AGENT_JWT_SECRET` | (auto-provisioned) | HMAC-SHA256 secret used to sign short-lived agent run JWTs. In `local_trusted` mode the server mints a 32-byte random hex secret on first boot and persists it to the instance `.env` file (mode 0600). Set explicitly to override. |
+| `BETTER_AUTH_SECRET` | (unset) | Accepted as a fallback for `PAPERCLIP_AGENT_JWT_SECRET`. If set, no auto-provisioning occurs. |
+| `PAPERCLIP_AGENT_JWT_TTL_SECONDS` | `172800` (48 h) | Lifetime of each agent run JWT. |
+| `PAPERCLIP_AGENT_JWT_ISSUER` | `paperclip` | JWT `iss` claim. |
+| `PAPERCLIP_AGENT_JWT_AUDIENCE` | `paperclip-api` | JWT `aud` claim. |
+
+> **Auto-provisioning (local_trusted mode):** On first boot with no `.env` present, the server writes `PAPERCLIP_AGENT_JWT_SECRET` into `<instance-dir>/.env` and loads it into `process.env` before the heartbeat scheduler starts. Subsequent boots detect the existing value and skip provisioning. In `authenticated` mode no auto-provisioning occurs — a missing secret throws at startup so misconfig remains loud.
+
 ## Agent Runtime (Injected into agent processes)
 
 These are set automatically by the server when invoking agents:

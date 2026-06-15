@@ -47,6 +47,7 @@ import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { conflict } from "./errors.js";
+import { ensureLocalTrustedJwtSecret } from "./local-trusted-provision.js";
 import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
@@ -101,7 +102,12 @@ export async function startServer(): Promise<StartedServer> {
   if (process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE === undefined) {
     process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = config.secretsMasterKeyFilePath;
   }
-  
+
+  let jwtSecretAutoProvisioned = false;
+  if (config.deploymentMode === "local_trusted") {
+    jwtSecretAutoProvisioned = ensureLocalTrustedJwtSecret();
+  }
+
   type MigrationSummary =
     | "skipped"
     | "already applied"
@@ -895,6 +901,7 @@ export async function startServer(): Promise<StartedServer> {
         databaseBackupIntervalMinutes: config.databaseBackupIntervalMinutes,
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,
         databaseBackupDir: config.databaseBackupDir,
+        jwtSecretAutoProvisioned,
       });
 
       const boardClaimUrl = getBoardClaimWarningUrl(config.host, listenPort);
