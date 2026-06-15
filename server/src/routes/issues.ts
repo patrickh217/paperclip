@@ -4664,6 +4664,22 @@ export function issueRoutes(
     assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     if (!(await assertAgentIssueMutationAllowed(req, res, existing, { allowManagerOverride: true }))) return;
+    if (res.locals.managerOverride) {
+      const MANAGER_OVERRIDE_ALLOWED_FIELDS = new Set([
+        "status", "blockedByIssueIds", "priority", "labelIds", "projectId",
+        "goalId", "parentId", "billingCode", "title", "description",
+        "comment", "reviewRequest", "reopen", "resume", "interrupt", "hiddenAt",
+      ]);
+      const violating = Object.keys(req.body).filter((k) => !MANAGER_OVERRIDE_ALLOWED_FIELDS.has(k));
+      if (violating.length > 0) {
+        res.status(403).json({ error: "field outside manager-override allowlist", fields: violating });
+        return;
+      }
+      if (existing.status === "in_progress") {
+        res.status(409).json({ error: "report has active checkout; use tasks:manage_active_checkouts override path" });
+        return;
+      }
+    }
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
 
     const actor = getActorInfo(req);
@@ -4687,21 +4703,6 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
-    if (res.locals.managerOverride) {
-      const MANAGER_OVERRIDE_ALLOWED_FIELDS = new Set([
-        "status", "blockedByIssueIds", "priority", "labelIds", "projectId",
-        "goalId", "parentId", "billingCode", "title", "description",
-      ]);
-      const violating = Object.keys(updateFields).filter((k) => !MANAGER_OVERRIDE_ALLOWED_FIELDS.has(k));
-      if (violating.length > 0) {
-        res.status(403).json({ error: "field outside manager-override allowlist", fields: violating });
-        return;
-      }
-      if (existing.status === "in_progress") {
-        res.status(409).json({ error: "report has active checkout; use tasks:manage_active_checkouts override path" });
-        return;
-      }
-    }
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
