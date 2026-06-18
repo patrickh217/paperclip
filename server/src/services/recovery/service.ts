@@ -2032,6 +2032,31 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     ].join("\n");
   }
 
+  // Walks an ordered list of candidate agent ids and returns the first one that
+  // is in-company, invokable, and not budget-blocked for this issue.
+  async function firstInvokableRecoveryOwnerAgentId(
+    issue: typeof issues.$inferSelect,
+    candidateIds: readonly (string | null | undefined)[],
+  ) {
+    const seen = new Set<string>();
+    for (const agentId of candidateIds) {
+      if (!agentId || seen.has(agentId)) continue;
+      seen.add(agentId);
+      const candidate = await getAgent(agentId);
+      if (!candidate || candidate.companyId !== issue.companyId) continue;
+      const budgetBlock = await budgets.getInvocationBlock(issue.companyId, candidate.id, {
+        issueId: issue.id,
+        projectId: issue.projectId,
+      });
+      if ((await isAgentInvokable(candidate)) && !budgetBlock) return candidate.id;
+    }
+
+    return null;
+  }
+
+  // Manager-first ownership for the *escalation issue* path
+  // (ensureStrandedIssueRecoveryIssue): a separate recovery ticket is created
+  // and handed to a manager / CTO / CEO to investigate why the assignee stalled.
   async function resolveStrandedIssueRecoveryOwnerAgentId(issue: typeof issues.$inferSelect) {
     const candidateIds: string[] = [];
     if (issue.assigneeAgentId) {
@@ -2052,20 +2077,21 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     candidateIds.push(...roleCandidates.map((agent) => agent.id));
     if (issue.assigneeAgentId) candidateIds.push(issue.assigneeAgentId);
 
-    const seen = new Set<string>();
-    for (const agentId of candidateIds) {
-      if (seen.has(agentId)) continue;
-      seen.add(agentId);
-      const candidate = await getAgent(agentId);
-      if (!candidate || candidate.companyId !== issue.companyId) continue;
-      const budgetBlock = await budgets.getInvocationBlock(issue.companyId, candidate.id, {
-        issueId: issue.id,
-        projectId: issue.projectId,
-      });
-      if ((await isAgentInvokable(candidate)) && !budgetBlock) return candidate.id;
-    }
+    return firstInvokableRecoveryOwnerAgentId(issue, candidateIds);
+  }
 
-    return null;
+  // Assignee-first ownership for the *source-scoped recovery wake*
+  // (ensureSourceScopedStrandedRecoveryAction): we re-wake on the source issue
+  // itself to resume the stranded work, so the current assignee must own it
+  // before any manager/role escalation. SCH-714: reusing the manager-first
+  // resolver here mis-routed routine-spawned wakes onto the CTO instead of the
+  // routine's assignee. Precedence: issue.assigneeAgentId -> manager/role chain.
+  async function resolveSourceScopedRecoveryOwnerAgentId(issue: typeof issues.$inferSelect) {
+    if (issue.assigneeAgentId) {
+      const assigneeOwner = await firstInvokableRecoveryOwnerAgentId(issue, [issue.assigneeAgentId]);
+      if (assigneeOwner) return assigneeOwner;
+    }
+    return resolveStrandedIssueRecoveryOwnerAgentId(issue);
   }
 
   function buildStrandedIssueRecoveryDescription(input: {
@@ -2280,7 +2306,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
   }) {
     const recoveryCause = input.recoveryCause ?? "stranded_assigned_issue";
-    const ownerAgentId = await resolveStrandedIssueRecoveryOwnerAgentId(input.issue);
+    const ownerAgentId = await resolveSourceScopedRecoveryOwnerAgentId(input.issue);
     const now = new Date();
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,

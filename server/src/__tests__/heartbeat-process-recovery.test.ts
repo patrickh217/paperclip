@@ -2762,6 +2762,64 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments[0]?.body).toContain("Recovery owner: [CodexCoder]");
   });
 
+  // SCH-714: source-scoped recovery wakes must go to the issue's own assignee,
+  // not escalate up the manager / CTO / CEO chain. Previously the source-scoped
+  // path reused the manager-first escalation resolver, so a routine-spawned
+  // issue assigned to one agent kept recovery-waking that agent's CTO instead.
+  it("routes source-scoped recovery to the assignee even when a CTO exists above them", async () => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+      retryReason: "issue_continuation_needed",
+    });
+
+    // Insert an invokable CTO and make the assignee report to them. With the old
+    // manager-first resolver this CTO would be picked as the recovery owner.
+    const ctoAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: ctoAgentId,
+      companyId,
+      name: "RecoveryCTO",
+      role: "cto",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(agents).set({ reportsTo: ctoAgentId }).where(eq(agents.id, agentId));
+
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+
+    // expectSourceScopedStrandedRecoveryAction asserts ownerAgentId /
+    // previousOwnerAgentId / returnOwnerAgentId all equal the assignee, and that
+    // the recovery wake is enqueued for the assignee — this fails if the CTO is
+    // selected instead.
+    const recoveryAction = await expectSourceScopedStrandedRecoveryAction({
+      companyId,
+      agentId,
+      issueId,
+      runId,
+      previousStatus: "in_progress",
+      retryReason: "issue_continuation_needed",
+    });
+    expect(recoveryAction.ownerAgentId).toBe(agentId);
+    expect(recoveryAction.ownerAgentId).not.toBe(ctoAgentId);
+
+    const ctoWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.agentId, ctoAgentId),
+        eq(agentWakeupRequests.reason, "source_scoped_recovery_action"),
+      ));
+    expect(ctoWakeups).toHaveLength(0);
+  });
+
   it("redacts error-code-only stranded recovery failures in issue copy", async () => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
